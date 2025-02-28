@@ -15,6 +15,7 @@
 (define-constant err-user-not-verified (err u104))
 (define-constant err-invalid-verification-level (err u105))
 (define-constant err-not-owner (err u106))
+(define-constant err-invalid-data-hash (err u107))
 
 ;; Data structures
 (define-map verifiers principal bool)
@@ -61,6 +62,16 @@
   (default-to u0 (get verification-level (get-user-verification user)))
 )
 
+;; Helper function to validate verification level
+(define-private (is-valid-verification-level (level uint))
+  (or (is-eq level u1) (is-eq level u2) (is-eq level u3))
+)
+
+;; Helper function to validate data hash (non-zero)
+(define-private (is-valid-data-hash (hash (buff 32)))
+  (not (is-eq hash 0x0000000000000000000000000000000000000000000000000000000000000000))
+)
+
 ;; Public functions
 
 ;; Add a new verifier (only contract owner can do this)
@@ -85,80 +96,74 @@
 (define-public (verify-user (user principal) (verification-level uint) (data-hash (buff 32)))
   (begin
     (asserts! (is-verifier tx-sender) err-not-authorized)
-    (asserts! (or (is-eq verification-level u1) (is-eq verification-level u2) (is-eq verification-level u3)) err-invalid-verification-level)
-    (ok (map-set user-verification 
-      { user: user }
-      { 
-        verified: true, 
-        verification-level: verification-level, 
-        verification-date: block-height, 
-        data-hash: data-hash,
-        verifier: tx-sender 
-      }
-    ))
+    (asserts! (is-valid-verification-level verification-level) err-invalid-verification-level)
+    (asserts! (is-valid-data-hash data-hash) err-invalid-data-hash)
+    
+    ;; Use a variable to store the sanitized user data structure
+    (let ((user-entry { user: user })
+          (verification-data { 
+            verified: true, 
+            verification-level: verification-level, 
+            verification-date: block-height, 
+            data-hash: data-hash,
+            verifier: tx-sender 
+          }))
+      (ok (map-set user-verification user-entry verification-data))
+    )
   )
 )
 
 ;; Revoke verification for a user (can be done by the verifier who verified the user or contract owner)
 (define-public (revoke-verification (user principal))
-  (let ((current-verification (unwrap! (get-user-verification user) err-user-not-verified)))
-    (begin
-      (asserts! (or 
-                 (is-eq tx-sender (get verifier current-verification))
-                 (is-eq tx-sender contract-owner)) 
-                err-not-authorized)
-      (ok (map-set user-verification 
-        { user: user }
-        { 
+  (let ((current-verification (unwrap! (get-user-verification user) err-user-not-verified))
+        (user-entry { user: user })
+        (revoked-data { 
           verified: false, 
           verification-level: u0, 
           verification-date: block-height, 
           data-hash: 0x0000000000000000000000000000000000000000000000000000000000000000,
           verifier: tx-sender 
-        }
-      ))
+        }))
+    (begin
+      (asserts! (or 
+                 (is-eq tx-sender (get verifier current-verification))
+                 (is-eq tx-sender contract-owner)) 
+                err-not-authorized)
+      (ok (map-set user-verification user-entry revoked-data))
     )
   )
 )
 
 ;; Users can remove their own verification (self-revocation)
 (define-public (self-revoke-verification)
-  (let ((user tx-sender))
-    (begin
-      (asserts! (is-user-verified user) err-user-not-verified)
-      (ok (map-set user-verification 
-        { user: user }
-        { 
+  (let ((user tx-sender)
+        (user-entry { user: tx-sender })
+        (revoked-data { 
           verified: false, 
           verification-level: u0, 
           verification-date: block-height, 
           data-hash: 0x0000000000000000000000000000000000000000000000000000000000000000,
           verifier: tx-sender 
-        }
-      ))
+        }))
+    (begin
+      (asserts! (is-user-verified user) err-user-not-verified)
+      (ok (map-set user-verification user-entry revoked-data))
     )
   )
 )
 
 ;; Update verification level (only authorized verifiers can do this)
 (define-public (update-verification-level (user principal) (new-verification-level uint))
-  (let ((current-verification (unwrap! (get-user-verification user) err-user-not-verified)))
+  (let ((current-verification (unwrap! (get-user-verification user) err-user-not-verified))
+        (user-entry { user: user }))
     (begin
       (asserts! (is-verifier tx-sender) err-not-authorized)
-      (asserts! (or (is-eq new-verification-level u1) (is-eq new-verification-level u2) (is-eq new-verification-level u3)) err-invalid-verification-level)
-      (ok (map-set user-verification 
-        { user: user }
-        (merge current-verification { verification-level: new-verification-level })
-      ))
+      (asserts! (is-valid-verification-level new-verification-level) err-invalid-verification-level)
+      
+      ;; Create an updated verification record with the new level
+      (let ((updated-verification (merge current-verification { verification-level: new-verification-level })))
+        (ok (map-set user-verification user-entry updated-verification))
+      )
     )
   )
 )
-
-;; ;; Utility function to transfer contract ownership
-;; (define-public (transfer-ownership (new-owner principal))
-;;   (begin
-;;     (asserts! (is-eq tx-sender contract-owner) err-not-owner)
-;;     (var-set contract-owner new-owner) 
-;;     (ok true)
-;;   )
-;; )
